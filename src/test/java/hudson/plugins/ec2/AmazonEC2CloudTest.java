@@ -123,7 +123,6 @@ r.jenkins.clouds.add(orig);
         // Spy on the EC2Cloud object to intercept the call to .connect() and return our mocked cloud
         EC2Cloud rawCloud = new AmazonEC2Cloud("", false, "", "eu-west-1", "", "", templates);
         EC2Cloud spiedCloud = Mockito.spy(rawCloud);
-        //Mockito.when(spiedCloud.connect()).thenReturn(ec2);
         doReturn(ec2).when(spiedCloud).connect();
 
         SlaveTemplate template = spiedCloud.getTemplate(Label.parse(label).iterator().next());
