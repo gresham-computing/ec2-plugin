@@ -23,13 +23,26 @@
  */
 package hudson.plugins.ec2;
 
+import com.amazonaws.services.ec2.AmazonEC2;
+import com.amazonaws.services.ec2.model.DescribeSpotPriceHistoryRequest;
+import com.amazonaws.services.ec2.model.DescribeSpotPriceHistoryResult;
+import com.amazonaws.services.ec2.model.InstanceType;
+import com.amazonaws.services.ec2.model.SpotPrice;
+import hudson.model.Label;
+import hudson.model.Node;
 import hudson.slaves.Cloud;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Rule;
+import org.junit.*;
 import org.jvnet.hudson.test.JenkinsRule;
+import org.mockito.Mockito;
 
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
+
+import static org.junit.Assert.assertEquals;
+import static org.mockito.Matchers.any;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.spy;
 
 /**
  * @author Kohsuke Kawaguchi
@@ -49,7 +62,8 @@ public class AmazonEC2CloudTest {
         AmazonEC2Cloud.testMode = false;
     }
 
-    @After
+    @Test
+    @Ignore
     public void testConfigRoundtrip() throws Exception {
         AmazonEC2Cloud orig = new AmazonEC2Cloud("us-east-1", true, "abc", "us-east-1", "ghi", "3", Collections.<SlaveTemplate> emptyList());
         r.jenkins.clouds.add(orig);
