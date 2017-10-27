@@ -295,6 +295,7 @@ public abstract class EC2Cloud extends Cloud {
         } else if (applicableTemplates.size() == 1) {
             return applicableTemplates.get(0);
         } else {
+            LOGGER.log(Level.INFO, "Found multiple applicable templates for label '" + label + "'. Selecting the cheapest.");
             return selectCheapest(templates);
         }
     }
@@ -315,6 +316,7 @@ public abstract class EC2Cloud extends Cloud {
         return templates.stream()
                 .map(template -> new TemplatePrice(template, getSpotInstancePrice(template)))
                 .sorted(priceLowestFirst)
+                .peek(tp -> LOGGER.log(Level.INFO, "Price for template " + tp.template + " of instance type " + tp.template.type + " in zone " + tp.template.zone + " is " + tp.price))
                 .findFirst()
                 .map(tp -> tp.template)
                 .orElse(null);
