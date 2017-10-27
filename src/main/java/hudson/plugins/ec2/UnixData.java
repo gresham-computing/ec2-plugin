@@ -50,6 +50,11 @@ public class UnixData extends AMITypeData {
     }
 
     @Override
+    public String getProductType() {
+        return "Linux/UNIX";
+    }
+
+    @Override
     public int hashCode() {
         final int prime = 31;
         int result = 1;

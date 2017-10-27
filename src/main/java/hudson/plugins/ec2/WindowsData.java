@@ -60,6 +60,11 @@ public class WindowsData extends AMITypeData {
     }
 
     @Override
+    public String getProductType() {
+        return "Windows";
+    }
+
+    @Override
     public int hashCode() {
         final int prime = 31;
         int result = 1;
