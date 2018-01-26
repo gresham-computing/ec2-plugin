@@ -296,7 +296,7 @@ public abstract class EC2Cloud extends Cloud {
             return applicableTemplates.get(0);
         } else {
             LOGGER.log(Level.INFO, "Found multiple applicable templates for label '" + label + "'. Selecting the cheapest.");
-            return selectCheapest(templates);
+            return selectCheapest(applicableTemplates);
         }
     }
 
