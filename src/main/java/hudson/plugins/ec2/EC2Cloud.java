@@ -18,10 +18,12 @@
  */
 package hudson.plugins.ec2;
 
+import static java.util.stream.Collectors.toList;
 import static javax.servlet.http.HttpServletResponse.SC_BAD_REQUEST;
 import static javax.servlet.http.HttpServletResponse.SC_INTERNAL_SERVER_ERROR;
 import com.amazonaws.ClientConfiguration;
 import com.amazonaws.auth.DefaultAWSCredentialsProviderChain;
+import com.amazonaws.services.ec2.model.*;
 import com.cloudbees.jenkins.plugins.awscredentials.AWSCredentialsImpl;
 import com.cloudbees.jenkins.plugins.awscredentials.AmazonWebServicesCredentials;
 import com.cloudbees.plugins.credentials.Credentials;
@@ -32,6 +34,7 @@ import com.cloudbees.plugins.credentials.CredentialsStore;
 import com.cloudbees.plugins.credentials.SystemCredentialsProvider;
 import com.cloudbees.plugins.credentials.common.StandardListBoxModel;
 import com.cloudbees.plugins.credentials.domains.Domain;
+import com.google.common.collect.Ordering;
 import edu.umd.cs.findbugs.annotations.CheckForNull;
 import edu.umd.cs.findbugs.annotations.Nullable;
 import hudson.ProxyConfiguration;
@@ -55,23 +58,17 @@ import java.io.PrintStream;
 import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.math.BigDecimal;
 import java.net.InetSocketAddress;
 import java.net.MalformedURLException;
 import java.net.Proxy;
 import java.net.URL;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Date;
-import java.util.EnumSet;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
-import java.util.HashMap;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.Callable;
+import java.util.function.Predicate;
+import java.util.Comparator;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
@@ -97,17 +94,6 @@ import com.amazonaws.auth.InstanceProfileCredentialsProvider;
 import com.amazonaws.internal.StaticCredentialsProvider;
 import com.amazonaws.services.ec2.AmazonEC2;
 import com.amazonaws.services.ec2.AmazonEC2Client;
-import com.amazonaws.services.ec2.model.CreateKeyPairRequest;
-import com.amazonaws.services.ec2.model.DescribeSpotInstanceRequestsRequest;
-import com.amazonaws.services.ec2.model.Filter;
-import com.amazonaws.services.ec2.model.Instance;
-import com.amazonaws.services.ec2.model.InstanceStateName;
-import com.amazonaws.services.ec2.model.InstanceType;
-import com.amazonaws.services.ec2.model.KeyPair;
-import com.amazonaws.services.ec2.model.KeyPairInfo;
-import com.amazonaws.services.ec2.model.Reservation;
-import com.amazonaws.services.ec2.model.SpotInstanceRequest;
-import com.amazonaws.services.ec2.model.Tag;
 import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.AmazonS3Client;
 import com.amazonaws.services.s3.model.GeneratePresignedUrlRequest;
@@ -287,18 +273,80 @@ public abstract class EC2Cloud extends Cloud {
      * Gets {@link SlaveTemplate} that has the matching {@link Label}.
      */
     public SlaveTemplate getTemplate(Label label) {
-        for (SlaveTemplate t : templates) {
+        Predicate<SlaveTemplate> applicableForLabel = t -> {
             if (t.getMode() == Node.Mode.NORMAL) {
                 if (label == null || label.matches(t.getLabelSet())) {
-                    return t;
+                    return true;
                 }
             } else if (t.getMode() == Node.Mode.EXCLUSIVE) {
                 if (label != null && label.matches(t.getLabelSet())) {
-                    return t;
+                    return true;
                 }
             }
+            return false;
+        };
+
+        List<SlaveTemplate> applicableTemplates = templates.stream()
+                .filter(applicableForLabel)
+                .collect(toList());
+
+        if (applicableTemplates.isEmpty()) {
+            return null;
+        } else if (applicableTemplates.size() == 1) {
+            return applicableTemplates.get(0);
+        } else {
+            LOGGER.log(Level.INFO, "Found multiple applicable templates for label '" + label + "'. Selecting the cheapest.");
+            return selectCheapest(applicableTemplates);
         }
-        return null;
+    }
+
+    private SlaveTemplate selectCheapest(Collection<? extends SlaveTemplate> templates) {
+        class TemplatePrice {
+            private final SlaveTemplate template;
+            private final BigDecimal price;
+
+            private TemplatePrice(SlaveTemplate template, BigDecimal price) {
+                this.template = template;
+                this.price = price;
+            }
+        }
+
+        Ordering<TemplatePrice> priceLowestFirst = Ordering.natural().onResultOf(t -> t.price);
+
+        return templates.stream()
+                .map(template -> new TemplatePrice(template, getSpotInstancePrice(template)))
+                .sorted(priceLowestFirst)
+                .peek(tp -> LOGGER.log(Level.INFO, "Price for template " + tp.template + " of instance type " + tp.template.type + " in zone " + tp.template.zone + " is " + tp.price))
+                .findFirst()
+                .map(tp -> tp.template)
+                .orElse(null);
+    }
+
+    private BigDecimal getTemplatePrice(SlaveTemplate template) {
+        if (template.spotConfig != null) {
+            return getSpotInstancePrice(template);
+        } else {
+            return getEc2InstancePrice(template);
+        }
+    }
+
+    private BigDecimal getEc2InstancePrice(SlaveTemplate template) {
+        // TODO This is hard because the API for this is hard. For now just return 100 and call it a day.
+        return new BigDecimal(100);
+    }
+
+    private BigDecimal getSpotInstancePrice(SlaveTemplate template) {
+        DescribeSpotPriceHistoryRequest request = new DescribeSpotPriceHistoryRequest();
+        request.setAvailabilityZone(template.zone);
+        request.setInstanceTypes(Collections.singletonList(template.type.toString()));
+        request.setMaxResults(1);
+        request.setProductDescriptions(Collections.singletonList(template.amiType.getProductType()));
+
+        AmazonEC2 ec2 = connect();
+        DescribeSpotPriceHistoryResult response = ec2.describeSpotPriceHistory(request);
+
+        // We asked for one so we'll get one
+        return new BigDecimal(response.getSpotPriceHistory().get(0).getSpotPrice());
     }
 
     /**
