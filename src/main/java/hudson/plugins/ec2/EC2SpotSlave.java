@@ -6,12 +6,11 @@ import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-import com.amazonaws.AmazonServiceException;
 import jenkins.model.Jenkins;
-import org.apache.commons.lang.StringUtils;
 import org.kohsuke.stapler.DataBoundConstructor;
 
 import com.amazonaws.AmazonClientException;
+import com.amazonaws.AmazonServiceException;
 import com.amazonaws.services.ec2.AmazonEC2;
 import com.amazonaws.services.ec2.model.CancelSpotInstanceRequestsRequest;
 import com.amazonaws.services.ec2.model.DescribeSpotInstanceRequestsRequest;
@@ -21,12 +20,11 @@ import com.amazonaws.services.ec2.model.SpotInstanceState;
 import com.amazonaws.services.ec2.model.TerminateInstancesRequest;
 
 import hudson.Extension;
+import hudson.model.Hudson;
 import hudson.model.Descriptor.FormException;
 import hudson.plugins.ec2.ssh.EC2UnixLauncher;
 import hudson.plugins.ec2.win.EC2WindowsLauncher;
 import hudson.slaves.NodeProperty;
-
-import javax.annotation.CheckForNull;
 
 public final class EC2SpotSlave extends EC2AbstractSlave {
     private static final Logger LOGGER = Logger.getLogger(EC2SpotSlave.class.getName());
@@ -69,32 +67,29 @@ public final class EC2SpotSlave extends EC2AbstractSlave {
 			try {
 				ec2.cancelSpotInstanceRequests(cancelRequest);
 				LOGGER.info("Canceled Spot request: " + spotInstanceRequestId);
+
+				// Terminate the slave if it is running
+				if (instanceId != null && !instanceId.equals("")) {
+					if (!super.isAlive(true)) {
+						/*
+						 * The node has been killed externally, so we've nothing to do here
+						 */
+						LOGGER.info("EC2 instance already terminated: " + instanceId);
+					} else {
+						TerminateInstancesRequest request = new TerminateInstancesRequest(Collections.singletonList(instanceId));
+						ec2.terminateInstances(request);
+						LOGGER.info("Terminated EC2 instance (terminated): " + instanceId);
+					}
+
+				}
+
+			} catch (AmazonServiceException e) {
+				// Spot request is no longer valid
+				LOGGER.log(Level.WARNING, "Failed to terminated instance and cancel Spot request: " + spotInstanceRequestId, e);
 			} catch (AmazonClientException e) {
 				// Spot request is no longer valid
-				LOGGER.log(Level.WARNING, "Failed to cancel Spot request: " + spotInstanceRequestId, e);
-            }
-
-            // Terminate the slave if it is running
-            if (instanceId != null && !instanceId.equals("")) {
-                if (!super.isAlive(true)) {
-                    /*
-                     * The node has been killed externally, so we've nothing to do here
-                     */
-                    LOGGER.info("EC2 instance already terminated: " + instanceId);
-                } else {
-                    TerminateInstancesRequest request = new TerminateInstancesRequest(Collections.singletonList(instanceId));
-                    try {
-                        ec2.terminateInstances(request);
-                        LOGGER.info("Terminated EC2 instance (terminated): " + instanceId);
-                    } catch (AmazonServiceException e) {
-                        // Spot request is no longer valid
-                        LOGGER.log(Level.WARNING, "Failed to terminate the Spot instance: " + instanceId, e);
-                    } catch (AmazonClientException e) {
-                        // Spot request is no longer valid
-                        LOGGER.log(Level.WARNING, "Failed to terminate the Spot instance: " + instanceId, e);
-                    }
-                }
-            }
+				LOGGER.log(Level.WARNING, "Failed to terminated instance and cancel Spot request: " + spotInstanceRequestId, e);
+			}
 		} catch (Exception e) {
 			LOGGER.log(Level.WARNING,"Failed to remove slave: ", e);
 		} finally {
@@ -113,33 +108,35 @@ public final class EC2SpotSlave extends EC2AbstractSlave {
     /**
      * Retrieve the SpotRequest for a requestId
      *
-     * @return SpotInstanceRequest object for this slave, or null if request is not valid anymore
+     * @return SpotInstanceRequest object for this slave, or null
      */
-    @CheckForNull
     SpotInstanceRequest getSpotRequest() {
         AmazonEC2 ec2 = getCloud().connect();
 
         DescribeSpotInstanceRequestsRequest dsirRequest = new DescribeSpotInstanceRequestsRequest().withSpotInstanceRequestIds(this.spotInstanceRequestId);
-        try {
-            DescribeSpotInstanceRequestsResult dsirResult = ec2.describeSpotInstanceRequests(dsirRequest);
-            List<SpotInstanceRequest> siRequests = dsirResult.getSpotInstanceRequests();
+        DescribeSpotInstanceRequestsResult dsirResult = null;
+        List<SpotInstanceRequest> siRequests = null;
 
-            return siRequests.get(0);
+        try {
+            dsirResult = ec2.describeSpotInstanceRequests(dsirRequest);
+            siRequests = dsirResult.getSpotInstanceRequests();
+
+        } catch (AmazonServiceException e) {
+            // Spot request is no longer valid
+            LOGGER.log(Level.WARNING, "Failed to fetch spot instance request for requestId: " + this.spotInstanceRequestId);
         } catch (AmazonClientException e) {
             // Spot request is no longer valid
             LOGGER.log(Level.WARNING, "Failed to fetch spot instance request for requestId: " + this.spotInstanceRequestId);
         }
 
-        return null;
+        if (dsirResult == null || siRequests.isEmpty()) {
+            return null;
+        }
+        return siRequests.get(0);
     }
 
     public boolean isSpotRequestDead() {
-        SpotInstanceRequest spotRequest = getSpotRequest();
-        if (spotRequest == null) {
-            return true;
-        }
-
-        SpotInstanceState requestState = SpotInstanceState.fromValue(spotRequest.getState());
+        SpotInstanceState requestState = SpotInstanceState.fromValue(this.getSpotRequest().getState());
         return requestState == SpotInstanceState.Cancelled
                 || requestState == SpotInstanceState.Closed
                 || requestState == SpotInstanceState.Failed;
@@ -154,8 +151,8 @@ public final class EC2SpotSlave extends EC2AbstractSlave {
 
     @Override
     public String getInstanceId() {
-        if (StringUtils.isEmpty(instanceId)) {
-            SpotInstanceRequest sr = getSpotRequest();
+        if (instanceId == null || instanceId.equals("")) {
+            SpotInstanceRequest sr = this.getSpotRequest();
             if (sr != null)
                 instanceId = sr.getInstanceId();
         }

@@ -2,7 +2,6 @@ package hudson.plugins.ec2.win;
 
 import hudson.model.Descriptor;
 import hudson.model.TaskListener;
-import hudson.plugins.ec2.EC2AbstractSlave;
 import hudson.plugins.ec2.EC2Computer;
 import hudson.plugins.ec2.EC2ComputerLauncher;
 import hudson.plugins.ec2.win.winrm.WindowsProcess;
@@ -28,19 +27,14 @@ public class EC2WindowsLauncher extends EC2ComputerLauncher {
     final long sleepBetweenAttemps = TimeUnit.SECONDS.toMillis(10);
 
     @Override
-    protected void launchScript(EC2Computer computer, TaskListener listener) throws IOException,
+    protected void launch(EC2Computer computer, TaskListener listener, Instance inst) throws IOException,
             AmazonClientException, InterruptedException {
         final PrintStream logger = listener.getLogger();
         final WinConnection connection = connectToWinRM(computer, logger);
-        EC2AbstractSlave node = computer.getNode();
-        if (node == null || connection == null) {
-            logger.println("Unable to fetch node information");
-            return;
-        }
 
         try {
-            String initScript = node.initScript;
-            String tmpDir = (node.tmpDir != null && !node.tmpDir.equals("") ? node.tmpDir
+            String initScript = computer.getNode().initScript;
+            String tmpDir = (computer.getNode().tmpDir != null && !computer.getNode().tmpDir.equals("") ? computer.getNode().tmpDir
                     : "C:\\Windows\\Temp\\");
 
             logger.println("Creating tmp directory if it does not exist");
@@ -70,7 +64,7 @@ public class EC2WindowsLauncher extends EC2ComputerLauncher {
 
             logger.println("slave.jar sent remotely. Bootstrapping it");
 
-            final String jvmopts = node.jvmopts;
+            final String jvmopts = computer.getNode().jvmopts;
             final WindowsProcess process = connection.execute("java " + (jvmopts != null ? jvmopts : "") + " -jar "
                     + tmpDir + SLAVE_JAR, 86400);
             computer.setChannel(process.getStdout(), process.getStdin(), logger, new Listener() {
@@ -90,20 +84,15 @@ public class EC2WindowsLauncher extends EC2ComputerLauncher {
 
     private WinConnection connectToWinRM(EC2Computer computer, PrintStream logger) throws AmazonClientException,
             InterruptedException {
-        EC2AbstractSlave node = computer.getNode();
-        if (node == null) {
-            return null;
-        }
-
         final long minTimeout = 3000;
-        long timeout = node.getLaunchTimeoutInMillis(); // timeout is less than 0 when jenkins is booting up.
+        long timeout = computer.getNode().getLaunchTimeoutInMillis(); // timeout is less than 0 when jenkins is booting up.
         if (timeout < minTimeout) {
             timeout = minTimeout;
         }
         final long startTime = System.currentTimeMillis();
 
-        logger.println(node.getDisplayName() + " booted at " + node.getCreatedTime());
-        boolean alreadyBooted = (startTime - node.getCreatedTime()) > TimeUnit.MINUTES.toMillis(3);
+        logger.println(computer.getNode().getDisplayName() + " booted at " + computer.getNode().getCreatedTime());
+        boolean alreadyBooted = (startTime - computer.getNode().getCreatedTime()) > TimeUnit.MINUTES.toMillis(3);
         while (true) {
             try {
                 long waitTime = System.currentTimeMillis() - startTime;
@@ -114,7 +103,7 @@ public class EC2WindowsLauncher extends EC2ComputerLauncher {
                 Instance instance = computer.updateInstanceDescription();
                 String ip, host;
 
-                if (node.usePrivateDnsName) {
+                if (computer.getNode().usePrivateDnsName) {
                     host = instance.getPrivateDnsName();
                     ip = instance.getPrivateIpAddress(); // SmbFile doesn't
                                                          // quite work with
@@ -139,23 +128,23 @@ public class EC2WindowsLauncher extends EC2ComputerLauncher {
                     throw new IOException("goto sleep");
                 }
 
-                logger.println("Connecting to " + host + "(" + ip + ") with WinRM as " + node.remoteAdmin);
+                logger.println("Connecting to " + host + "(" + ip + ") with WinRM as " + computer.getNode().remoteAdmin);
 
-                WinConnection connection = new WinConnection(ip, node.remoteAdmin, node.getAdminPassword().getPlainText());
+                WinConnection connection = new WinConnection(ip, computer.getNode().remoteAdmin, computer.getNode().getAdminPassword().getPlainText());
 
-                connection.setUseHTTPS(node.isUseHTTPS());
+                connection.setUseHTTPS(computer.getNode().isUseHTTPS());
                 if (!connection.ping()) {
                     logger.println("Waiting for WinRM to come up. Sleeping 10s.");
                     Thread.sleep(sleepBetweenAttemps);
                     continue;
                 }
 
-                if (!alreadyBooted || node.stopOnTerminate) {
+                if (!alreadyBooted || computer.getNode().stopOnTerminate) {
                     logger.println("WinRM service responded. Waiting for WinRM service to stabilize on "
-                            + node.getDisplayName());
-                    Thread.sleep(node.getBootDelay());
+                            + computer.getNode().getDisplayName());
+                    Thread.sleep(computer.getNode().getBootDelay());
                     alreadyBooted = true;
-                    logger.println("WinRM should now be ok on " + node.getDisplayName());
+                    logger.println("WinRM should now be ok on " + computer.getNode().getDisplayName());
                     if (!connection.ping()) {
                         logger.println("WinRM not yet up. Sleeping 10s.");
                         Thread.sleep(sleepBetweenAttemps);

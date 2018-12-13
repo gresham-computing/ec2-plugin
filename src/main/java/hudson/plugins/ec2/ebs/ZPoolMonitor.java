@@ -51,16 +51,14 @@ public class ZPoolMonitor extends PeriodicWork {
 
     @Override
     protected void doRun() {
-        ZPoolExpandNotice zen = AdministrativeMonitor.all().get(ZPoolExpandNotice.class);
-        Jenkins jenkinsInstance = Jenkins.getInstance();
         ZFSFileSystem fs = null;
         try {
-            if (isInsideEC2() && jenkinsInstance != null)
-                fs = new LibZFS().getFileSystemByMountPoint(jenkinsInstance.getRootDir());
+            if (isInsideEC2())
+                fs = new LibZFS().getFileSystemByMountPoint(Jenkins.getInstance().getRootDir());
         } catch (LinkageError e) {
             // probably not running on OpenSolaris
         }
-        if (fs == null || zen == null) {
+        if (fs == null) {
             cancel();
             return;
         }
@@ -71,6 +69,7 @@ public class ZPoolMonitor extends PeriodicWork {
         // if the disk is 90% filled up and the available space is less than
         // 1GB,
         // notify the user
+        ZPoolExpandNotice zen = AdministrativeMonitor.all().get(ZPoolExpandNotice.class);
         zen.activated = t / a > 10 && a < 1000L * 1000 * 1000;
     }
 

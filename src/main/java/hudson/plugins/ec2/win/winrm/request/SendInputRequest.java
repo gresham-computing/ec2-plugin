@@ -18,7 +18,7 @@ public class SendInputRequest extends AbstractWinRMRequest {
 
     public SendInputRequest(URL url, byte[] input, String shellId, String commandId) {
         super(url);
-        this.input = input.clone();
+        this.input = input;
         this.commandId = commandId;
         this.shellId = shellId;
     }

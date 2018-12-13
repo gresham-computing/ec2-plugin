@@ -46,9 +46,4 @@ public class ZPoolExpandNotice extends AdministrativeMonitor {
     public boolean isActivated() {
         return activated;
     }
-
-    @Override
-    public String getDisplayName() {
-        return Messages.ZPoolExpandNotice_DisplayName();
-    }
 }
