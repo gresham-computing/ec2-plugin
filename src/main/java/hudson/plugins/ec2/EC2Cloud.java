@@ -21,11 +21,8 @@ package hudson.plugins.ec2;
 import static java.util.stream.Collectors.toList;
 import static javax.servlet.http.HttpServletResponse.SC_BAD_REQUEST;
 import static javax.servlet.http.HttpServletResponse.SC_INTERNAL_SERVER_ERROR;
-import com.amazonaws.ClientConfiguration;
-import com.amazonaws.auth.AWSStaticCredentialsProvider;
 import com.amazonaws.auth.DefaultAWSCredentialsProviderChain;
 import com.amazonaws.auth.STSAssumeRoleSessionCredentialsProvider;
-import com.amazonaws.auth.STSSessionCredentialsProvider;
 import com.amazonaws.services.ec2.model.*;
 import com.amazonaws.services.securitytoken.AWSSecurityTokenServiceClientBuilder;
 import com.cloudbees.jenkins.plugins.awscredentials.AWSCredentialsImpl;
@@ -41,25 +38,11 @@ import com.cloudbees.plugins.credentials.domains.Domain;
 import com.google.common.collect.Ordering;
 import edu.umd.cs.findbugs.annotations.CheckForNull;
 import edu.umd.cs.findbugs.annotations.Nullable;
-import hudson.ProxyConfiguration;
-import hudson.model.Computer;
-import hudson.model.Descriptor;
-import hudson.model.Hudson;
-import hudson.model.Label;
-import hudson.model.Node;
 import hudson.security.ACL;
-import hudson.slaves.Cloud;
-import hudson.slaves.NodeProvisioner.PlannedNode;
-import hudson.util.FormValidation;
-import hudson.util.HttpResponses;
-import hudson.util.ListBoxModel;
-import hudson.util.Secret;
-import hudson.util.StreamTaskListener;
 
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.PrintStream;
-import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
 import java.math.BigDecimal;
@@ -67,11 +50,20 @@ import java.net.InetSocketAddress;
 import java.net.MalformedURLException;
 import java.net.Proxy;
 import java.net.URL;
-import java.text.DateFormat;
-import java.text.SimpleDateFormat;
-import java.util.*;
+import java.nio.charset.Charset;
+import java.security.interfaces.RSAPublicKey;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Date;
+import java.util.EnumSet;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Predicate;
 import java.util.Comparator;
 import java.util.logging.Level;
@@ -82,15 +74,13 @@ import java.util.logging.SimpleFormatter;
 import javax.servlet.ServletException;
 
 import hudson.model.TaskListener;
-import hudson.util.FormValidation;
-import hudson.util.HttpResponses;
 import hudson.util.ListBoxModel;
-import hudson.util.Secret;
-import hudson.util.StreamTaskListener;
 import jenkins.model.Jenkins;
 import jenkins.model.JenkinsLocationConfiguration;
 
+import org.apache.commons.codec.binary.Base64;
 import org.apache.commons.lang.StringUtils;
+import org.jenkinsci.main.modules.instance_identity.InstanceIdentity;
 import org.kohsuke.stapler.HttpResponse;
 import org.kohsuke.stapler.QueryParameter;
 import org.kohsuke.stapler.StaplerRequest;
@@ -100,7 +90,6 @@ import com.amazonaws.AmazonClientException;
 import com.amazonaws.ClientConfiguration;
 import com.amazonaws.auth.AWSCredentials;
 import com.amazonaws.auth.AWSCredentialsProvider;
-import com.amazonaws.auth.BasicAWSCredentials;
 import com.amazonaws.auth.InstanceProfileCredentialsProvider;
 import com.amazonaws.internal.StaticCredentialsProvider;
 import com.amazonaws.services.ec2.AmazonEC2;
@@ -123,7 +112,6 @@ import com.amazonaws.services.s3.model.GeneratePresignedUrlRequest;
 import hudson.ProxyConfiguration;
 import hudson.model.Computer;
 import hudson.model.Descriptor;
-import hudson.model.Hudson;
 import hudson.model.Label;
 import hudson.model.Node;
 import hudson.slaves.Cloud;
@@ -151,6 +139,8 @@ public abstract class EC2Cloud extends Cloud {
     public static final String EC2_SLAVE_TYPE_DEMAND = "demand";
 
     private static final SimpleFormatter sf = new SimpleFormatter();
+
+    private transient ReentrantLock slaveCountingLock = new ReentrantLock();
 
     private final boolean useInstanceProfileForCredentials;
 
@@ -436,6 +426,12 @@ public abstract class EC2Cloud extends Cloud {
         }
     }
 
+    // Delete when https://github.com/jenkinsci/instance-identity-module/pull/13 is released and available
+    public String getInstanceIdentityEncodedPublicKey() {
+        RSAPublicKey key = InstanceIdentity.get().getPublic();
+        return new String(Base64.encodeBase64(key.getEncoded()), Charset.forName("UTF-8"));
+    }
+
     /**
      * Counts the number of instances in EC2 that can be used with the specified image and a template. Also removes any
      * nodes associated with canceled requests.
@@ -447,6 +443,11 @@ public abstract class EC2Cloud extends Cloud {
         JenkinsLocationConfiguration jenkinsLocation = JenkinsLocationConfiguration.get();
         if (jenkinsLocation != null)
             jenkinsServerUrl = jenkinsLocation.getUrl();
+
+        if (jenkinsServerUrl == null) {
+            LOGGER.log(Level.WARNING, "No Jenkins server URL specified, using instance-identity instead");
+            jenkinsServerUrl = getInstanceIdentityEncodedPublicKey();
+        }
 
         LOGGER.log(Level.FINE, "Counting current slaves: "
             + (template != null ? (" AMI: " + template.getAmi() + " TemplateDesc: " + template.description) : " All AMIS")
@@ -493,7 +494,7 @@ public abstract class EC2Cloud extends Cloud {
             // Some ec2 implementations don't implement spot requests (Eucalyptus)
             LOGGER.log(Level.FINEST, "Describe spot instance requests failed", ex);
         }
-        Set<SpotInstanceRequest> sirSet = new HashSet();
+        Set<SpotInstanceRequest> sirSet = new HashSet<>();
 
         if (sirs != null) {
             for (SpotInstanceRequest sir : sirs) {
@@ -624,35 +625,34 @@ public abstract class EC2Cloud extends Cloud {
      * Obtains a slave whose AMI matches the AMI of the given template, and that also has requiredLabel (if requiredLabel is non-null)
      * forceCreateNew specifies that the creation of a new slave is required. Otherwise, an existing matching slave may be re-used
      */
-    private synchronized List<EC2AbstractSlave> getNewOrExistingAvailableSlave(SlaveTemplate t, int number, boolean forceCreateNew) {
-        /*
-         * Note this is synchronized between counting the instances and then allocating the node. Once the node is
-         * allocated, we don't look at that instance as available for provisioning.
-         */
-        int possibleSlavesCount = getPossibleNewSlavesCount(t);
-        if (possibleSlavesCount <= 0) {
-            LOGGER.log(Level.INFO, "{0}. Cannot provision - no capacity for instances: " + possibleSlavesCount, t);
-            return null;
-        }
-
+    private List<EC2AbstractSlave> getNewOrExistingAvailableSlave(SlaveTemplate t, int number, boolean forceCreateNew) {
         try {
-            EnumSet<SlaveTemplate.ProvisionOptions> provisionOptions;
-            if (forceCreateNew)
-                provisionOptions = EnumSet.of(SlaveTemplate.ProvisionOptions.FORCE_CREATE);
-            else
-                provisionOptions = EnumSet.of(SlaveTemplate.ProvisionOptions.ALLOW_CREATE);
-
-            if (number > possibleSlavesCount) {
-                LOGGER.log(Level.INFO, String.format("%d nodes were requested for the template %s, " +
-                        "but because of instance cap only %d can be provisioned", number, t, possibleSlavesCount));
-                number = possibleSlavesCount;
+            slaveCountingLock.lock();
+            int possibleSlavesCount = getPossibleNewSlavesCount(t);
+            if (possibleSlavesCount <= 0) {
+                LOGGER.log(Level.INFO, "{0}. Cannot provision - no capacity for instances: " + possibleSlavesCount, t);
+                return null;
             }
 
-            return t.provision(number, provisionOptions);
-        } catch (IOException e) {
-            LOGGER.log(Level.WARNING, t + ". Exception during provisioning", e);
-            return null;
-        }
+            try {
+                EnumSet<SlaveTemplate.ProvisionOptions> provisionOptions;
+                if (forceCreateNew)
+                    provisionOptions = EnumSet.of(SlaveTemplate.ProvisionOptions.FORCE_CREATE);
+                else
+                    provisionOptions = EnumSet.of(SlaveTemplate.ProvisionOptions.ALLOW_CREATE);
+
+                if (number > possibleSlavesCount) {
+                    LOGGER.log(Level.INFO, String.format("%d nodes were requested for the template %s, " +
+                            "but because of instance cap only %d can be provisioned", number, t, possibleSlavesCount));
+                    number = possibleSlavesCount;
+                }
+
+                return t.provision(number, provisionOptions);
+            } catch (IOException e) {
+                LOGGER.log(Level.WARNING, t + ". Exception during provisioning", e);
+                return null;
+            }
+        } finally { slaveCountingLock.unlock(); }
     }
 
     @Override
@@ -800,14 +800,14 @@ public abstract class EC2Cloud extends Cloud {
         }
         return (AmazonWebServicesCredentials) CredentialsMatchers.firstOrNull(
                 CredentialsProvider.lookupCredentials(AmazonWebServicesCredentials.class, Jenkins.getInstance(),
-                        ACL.SYSTEM, Collections.EMPTY_LIST),
+                        ACL.SYSTEM, Collections.emptyList()),
                 CredentialsMatchers.withId(credentialsId));
     }
 
     /**
      * Connects to EC2 and returns {@link AmazonEC2}, which can then be used to communicate with EC2.
      */
-    public synchronized AmazonEC2 connect() throws AmazonClientException {
+    public AmazonEC2 connect() throws AmazonClientException {
         try {
             if (connection == null) {
                 connection = connect(createCredentialsProvider(), getEc2EndpointUrl());
@@ -904,7 +904,7 @@ public abstract class EC2Cloud extends Cloud {
                 try {
                     new InstanceProfileCredentialsProvider().getCredentials();
                 } catch (AmazonClientException e) {
-                    return FormValidation.error(Messages.EC2Cloud_FailedToObtainCredentailsFromEC2(), e.getMessage());
+                    return FormValidation.error(Messages.EC2Cloud_FailedToObtainCredentialsFromEC2(), e.getMessage());
                 }
             }
 
@@ -995,7 +995,7 @@ public abstract class EC2Cloud extends Cloud {
                             CredentialsProvider.lookupCredentials(AmazonWebServicesCredentials.class,
                                     Jenkins.getInstance(),
                                     ACL.SYSTEM,
-                                    Collections.EMPTY_LIST));
+                                    Collections.emptyList()));
         }
     }
 
